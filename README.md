@@ -31,7 +31,7 @@
 ### Установка
 
 1. Клонируйте репозиторий:
-   git clone https://github.com/username/discipline-monitor.git
+   git clone (https://github.com/PLUXINDUI/Prac6.git)
    cd discipline-monitor
 
 2. Установите зависимости:
