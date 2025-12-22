@@ -16,13 +16,6 @@ from pathlib import Path
 from modules.detection import ViolationDetector
 from modules.face_recognition import FaceRecognizer
 from modules.video_processor import VideoProcessor
-from modules.detection_logic import (
-    process_frame_for_detection_correct,
-    draw_detections_with_boxes,
-    draw_sleep_indicator,
-    load_face_resources,
-    analyze_video_segment
-)
 
 # ═══════════════════════════════════════════════════════════════════════
 # КОНФИГУРАЦИЯ STREAMLIT
@@ -38,31 +31,89 @@ st.set_page_config(
 # Кастомный стиль
 st.markdown("""
 <style>
+    /* Общий фон */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    /* Заголовок */
     .main-title {
-        color: #1f77b4;
+        color: #2c3e50;
         text-align: center;
-        font-size: 2.5em;
-        font-weight: bold;
-        margin-bottom: 20px;
+        font-size: 2.8em;
+        font-weight: 800;
+        margin-bottom: 10px;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
+    .subtitle {
+        text-align: center;
+        color: #7f8c8d;
+        font-size: 1.1em;
+        margin-bottom: 30px;
+    }
+    /* Контейнеры метрик */
     .metric-container {
-        background-color: #f0f2f6;
+        background: white;
         padding: 20px;
-        border-radius: 10px;
-        margin: 10px 0;
+        border-radius: 16px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        margin: 12px 0;
+        border-left: 4px solid #3498db;
     }
+    /* Бейджи нарушений */
     .violation-badge {
         display: inline-block;
-        padding: 8px 12px;
-        border-radius: 20px;
+        padding: 6px 14px;
+        border-radius: 50px;
         color: white;
-        font-weight: bold;
-        margin: 5px;
+        font-weight: 600;
+        font-size: 0.95em;
+        margin: 4px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
     }
-    .sleeping { background-color: #ff6b6b; }
-    .phone { background-color: #ffa94d; }
-    .food { background-color: #74c0fc; }
-    .bottle { background-color: #b197fc; }
+    .sleeping { background: linear-gradient(135deg, #e74c3c, #c0392b); }
+    .phone { background: linear-gradient(135deg, #f39c12, #d35400); }
+    .food { background: linear-gradient(135deg, #3498db, #2980b9); }
+    .bottle { background: linear-gradient(135deg, #9b59b6, #8e44ad); }
+    /* Вкладки */
+    div[data-baseweb="tab-list"] {
+        gap: 12px;
+    }
+    div[data-baseweb="tab"] {
+        border-radius: 12px !important;
+        background: #f8f9fa;
+        padding: 8px 16px !important;
+        font-weight: 600;
+        color: #495057 !important;
+        border: none !important;
+    }
+    div[data-baseweb="tab"][aria-selected="true"] {
+        background: #3498db !important;
+        color: white !important;
+    }
+    /* Кнопки */
+    button[kind="primary"] {
+        background: linear-gradient(to right, #3498db, #2980b9);
+        border: none;
+        color: white;
+        font-weight: 600;
+    }
+    button[kind="primary"]:hover {
+        background: linear-gradient(to right, #2980b9, #1c6ea4);
+    }
+    /* Прогресс-бар */
+    div.stProgress > div > div > div {
+        background-color: #3498db;
+        height: 12px;
+        border-radius: 6px;
+    }
+    /* Экспандеры в журнале */
+    .streamlit-expanderHeader {
+        font-weight: 600 !important;
+        background-color: #f1f8ff !important;
+        border-radius: 10px !important;
+        padding: 10px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -103,21 +154,47 @@ def load_face_recognizer(db_path):
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ОБРАБОТКИ
 # ═══════════════════════════════════════════════════════════════════════
 
-def process_frame_for_detection(current_time, detections_in_frame, sleep_start_time, sleep_buffer):
+def process_frame_for_detection(current_time, detections, sleep_start_time, sleep_buffer):
     """
     ПРАВИЛЬНАЯ обработка кадра для получения confirmed_violations.
-    Использует логику из standalone скрипта.
     
     Args:
         current_time: текущее время
-        detections_in_frame: set названий обнаруженных классов {'sleeping', 'phone', ...}
+        detections: словарь обнаруженных классов {class_name: [...]}
         sleep_start_time: время начала обнаружения сна
         sleep_buffer: буфер подтверждения сна в секундах
     
     Returns:
         (confirmed_violations, new_sleep_start_time, new_last_detection_time)
     """
-    return process_frame_for_detection_correct(current_time, detections_in_frame, sleep_start_time, sleep_buffer)
+    confirmed_violations = set()
+    new_sleep_start_time = sleep_start_time
+    new_last_detection_time = None
+    
+    # ЛОГИКА БУФЕРА СНА: сон подтверждается только после sleep_buffer секунд
+    sleep_detected_in_frame = 'sleeping' in detections
+    
+    if sleep_detected_in_frame:
+        if new_sleep_start_time is None:
+            # Только что обнаружили сон, стартуем таймер
+            new_sleep_start_time = current_time
+        
+        # Проверка, прошло ли sleep_buffer секунд
+        if (current_time - new_sleep_start_time) >= sleep_buffer:
+            # Сон ПОДТВЕРЖДЕН - добавляем в confirmed_violations
+            confirmed_violations.add('sleeping')
+            new_last_detection_time = current_time
+    else:
+        # Сон не обнаружен, сбрасываем таймер
+        new_sleep_start_time = None
+    
+    # ДОБАВЛЕНИЕ ДРУГИХ НАРУШЕНИЙ (не требуют буфера)
+    for class_name in detections:
+        if class_name != 'sleeping':
+            confirmed_violations.add(class_name)
+            new_last_detection_time = current_time
+    
+    return confirmed_violations, new_sleep_start_time, new_last_detection_time
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -210,60 +287,47 @@ def process_webcam(video_container, metrics_container, frame_skip=2, buffer_seco
                 
                 # ПРАВИЛЬНАЯ ЛОГИКА: получаем подтвержденные нарушения
                 confirmed_violations, sleep_start_time, detection_time = process_frame_for_detection(
-                    current_time, set(detections.keys()), sleep_start_time, sleep_buffer
+                    current_time, detections, sleep_start_time, sleep_buffer
                 )
                 
-                # ─── ЛОГИКА ЗАПИСИ ВИДЕО ───
-                if confirmed_violations:
-                    if not recording:
-                        # НАЧАЛО записи
-                        segments_dir, _ = st.session_state.video_processor.setup_output_dirs()
-                        filename = st.session_state.video_processor.generate_segment_filename()
-                        current_segment_path = os.path.join(segments_dir, filename)
-                        
-                        st.session_state.video_processor.start_recording(
-                            current_segment_path,
-                            (width, height),
-                            fps
-                        )
-                        recording = True
-                        rec_violations = set(confirmed_violations)
-                    else:
-                        # Обновляем типы нарушений (объединяем с уже записанными)
-                        rec_violations.update(confirmed_violations)
+                # Сохраняем для визуализации
+                last_detections = detections
+                last_confirmed_violations = confirmed_violations
+                
+                # Обновляем время последней детекции если есть подтвережденные нарушения
+                if confirmed_violations and detection_time:
+                    last_detection_time = detection_time
+            
+            # ─── ЛОГИКА ЗАПИСИ ───
+            if confirmed_violations:
+                if not recording:
+                    # НАЧАЛО записи
+                    segments_dir, _ = st.session_state.video_processor.setup_output_dirs()
+                    filename = st.session_state.video_processor.generate_segment_filename()
+                    current_segment_path = os.path.join(segments_dir, filename)
+                    
+                    st.session_state.video_processor.start_recording(
+                        current_segment_path,
+                        (width, height),
+                        fps
+                    )
+                    recording = True
+                    rec_violations = set(confirmed_violations)
+                else:
+                    # Обновляем типы нарушений (объединяем с уже записанными)
+                    rec_violations.update(confirmed_violations)
             
             # ─── ВИЗУАЛИЗАЦИЯ НА КАДРЕ ───
-            # 1. Рисуем GREEN боксы ТОЛЬКО для подтвержденных нарушений
+            # Рисуем боксы для подтвержденных нарушений (пересечение last_detections и last_confirmed_violations)
             if last_detections and last_confirmed_violations:
-                # Пересечение: какие нарушения одновременно обнаружены И подтверждены
+                # Рисуем только те классы, которые и обнаружены, и подтверждены
                 violations_to_draw = last_confirmed_violations & set(last_detections.keys())
-                for class_name in violations_to_draw:
-                    if class_name in last_detections:
-                        boxes_list = last_detections[class_name]
-                        for box_info in boxes_list:
-                            x1, y1, x2, y2 = map(int, box_info['box'])
-                            conf = box_info['conf']
-                            # GREEN для подтвержденных
-                            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            label = f"{class_name} {conf:.2f}"
-                            cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                if violations_to_draw:
+                    annotated_frame = st.session_state.detector.draw_detections(
+                        annotated_frame, last_detections, violations_to_draw
+                    )
             
-            # 2. Индикатор буфера сна
-            if 'sleeping' in last_detections:
-                if sleep_start_time is not None:
-                    time_elapsed = current_time - sleep_start_time
-                    if time_elapsed >= sleep_buffer:
-                        # Сон подтвержден
-                        cv2.putText(annotated_frame, "SLEEP CONFIRMED", (50, 50),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                    else:
-                        # Ждем буфера
-                        time_left = sleep_buffer - time_elapsed
-                        cv2.putText(annotated_frame, f"Sleep Buffer: {time_left:.1f}s", (50, 50),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
-            
-            # 3. Красный индикатор записи ТОЛЬКО при нарушениях
+            # Красный индикатор записи
             if recording:
                 cv2.circle(annotated_frame, (30, 30), 10, (0, 0, 255), -1)
                 st.session_state.video_processor.write_frame(annotated_frame)
@@ -407,7 +471,7 @@ def process_video_file(video_path, video_container, metrics_container, frame_ski
                 
                 # ПРАВИЛЬНАЯ ЛОГИКА: получаем подтвержденные нарушения
                 confirmed_violations, sleep_start_time, detection_time = process_frame_for_detection(
-                    current_time, set(detections.keys()), sleep_start_time, sleep_buffer
+                    current_time, detections, sleep_start_time, sleep_buffer
                 )
                 
                 # Сохраняем для визуализации
@@ -438,31 +502,11 @@ def process_video_file(video_path, video_container, metrics_container, frame_ski
                     rec_violations.update(confirmed_violations)
             
             # ─── ВИЗУАЛИЗАЦИЯ НА КАДРЕ ───
-            # 1. Рисуем RED боксы для ВСЕХ обнаруженных объектов на этом кадре
-            if last_detections:
-                for class_name, boxes_list in last_detections.items():
-                    for box_info in boxes_list:
-                        x1, y1, x2, y2 = map(int, box_info['box'])
-                        conf = box_info['conf']
-                        # RED для всех обнаруженных
-                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                        label = f"{class_name} {conf:.2f}"
-                        cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            
-            # 2. Индикатор буфера сна
-            if 'sleeping' in last_detections:
-                if sleep_start_time is not None:
-                    time_elapsed = current_time - sleep_start_time
-                    if time_elapsed >= sleep_buffer:
-                        # Сон подтвержден
-                        cv2.putText(annotated_frame, "SLEEP CONFIRMED", (50, 50),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                    else:
-                        # Ждем буфера
-                        time_left = sleep_buffer - time_elapsed
-                        cv2.putText(annotated_frame, f"Sleep Buffer: {time_left:.1f}s", (50, 50),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
+            if recording or last_confirmed_violations:
+                # Показываем боксы для всех подтвержденных нарушений
+                annotated_frame = st.session_state.detector.draw_detections(
+                    annotated_frame, last_detections, last_confirmed_violations
+                )
             
             # Красный индикатор записи
             if recording:
@@ -650,7 +694,7 @@ def process_video_url(url, video_container, metrics_container, frame_skip=2, buf
                 
                 # CONFIRM: Получение подтвержденных нарушений с учетом буфера сна
                 confirmed_violations, sleep_start_time, detection_time = process_frame_for_detection(
-                    current_time, set(detections.keys()), sleep_start_time, sleep_buffer
+                    current_time, detections, sleep_start_time, sleep_buffer
                 )
                 last_confirmed_violations = confirmed_violations
                 if confirmed_violations and detection_time:
